@@ -23,6 +23,7 @@ import { createBuiltinRegistry, ToolRegistry } from '../tools/registry.js'
 import type { ToolDefinition } from '../tools/types.js'
 import { VERSION } from '../version.js'
 import { QueryHistory } from './history.js'
+import { createPasteAwareInput, type PasteAwareInput } from './input.js'
 import {
   createTurnRenderer,
   renderUserMessage,
@@ -98,6 +99,7 @@ export interface ReplOptions {
 export class Repl {
   private readonly rl: Interface
   private readonly out: (text: string) => void
+  private readonly rawOut: (text: string) => void
   private readonly history: QueryHistory
   private readonly selector: HistorySelector
   private readonly session: ConversationSession
@@ -108,6 +110,11 @@ export class Repl {
   private readonly color: boolean
   private readonly columns: () => number
   private readonly input: NodeJS.ReadableStream
+  private readonly pasteInput: PasteAwareInput | null = null
+  private readonly multilineBuffer: {
+    flag: symbol
+    refresh: () => void
+  } | null = null
   private language: string
   private skills: Skill[] = []
   private registry: ToolRegistry = createBuiltinRegistry()
@@ -120,6 +127,7 @@ export class Repl {
   private expandedCallId: number | null = null
   private trailingNewlines = 0
   private contentSincePrompt = false
+  private staged: string[] = []
   private readonly runtimeEnabled: boolean
 
   private busy = false
@@ -129,9 +137,8 @@ export class Repl {
   private closed = false
 
   constructor(options: ReplOptions = {}) {
-    const input = options.input ?? process.stdin
+    const rawInput = options.input ?? process.stdin
     const output = options.output ?? process.stdout
-    this.input = input
 
     this.history = options.history ?? new QueryHistory()
     this.language = options.language ?? detectLanguage()
@@ -170,9 +177,24 @@ export class Repl {
         this.contentSincePrompt = true
       }
     }
+    this.rawOut = (text: string) => {
+      output.write(text)
+    }
 
     const terminal = (output as { isTTY?: boolean }).isTTY === true
     this.terminal = terminal
+
+    let input = rawInput
+    if (terminal && (rawInput as { isTTY?: boolean }).isTTY === true) {
+      const pasteInput = createPasteAwareInput({
+        source: rawInput,
+        onPaste: (text) => this.handlePaste(text),
+      })
+      input = pasteInput
+      this.pasteInput = pasteInput
+    }
+    this.input = input
+
     this.rl = createInterface({
       input,
       output,
@@ -182,10 +204,35 @@ export class Repl {
       prompt: 'ask> ',
     })
 
-    this.prefill = options.prefill ?? ((text: string) => this.rl.write(text))
+    const multilineFlag = Object.getOwnPropertySymbols(this.rl).find(
+      (symbol) => symbol.description === '_isMultiline',
+    )
+    const refreshLine = (
+      this.rl as unknown as { _refreshLine?: unknown }
+    )._refreshLine
+    if (multilineFlag && typeof refreshLine === 'function') {
+      this.multilineBuffer = {
+        flag: multilineFlag,
+        refresh: refreshLine as () => void,
+      }
+    }
+
+    this.prefill =
+      options.prefill ??
+      ((text: string) => {
+        if (this.insertIntoInput(text)) {
+          return
+        }
+        if (!text.includes('\n')) {
+          this.rl.write(text)
+          return
+        }
+        this.handlePaste(text)
+      })
 
     this.rl.once('close', () => {
       this.closed = true
+      this.disableBracketedPaste()
     })
 
     if (terminal) {
@@ -232,6 +279,74 @@ export class Repl {
     }
   }
 
+  private enableBracketedPaste(): void {
+    if (this.pasteInput) {
+      this.rawOut('\x1b[?2004h')
+    }
+  }
+
+  private disableBracketedPaste(): void {
+    if (!this.pasteInput) {
+      return
+    }
+    this.rawOut('\x1b[?2004l')
+    this.pasteInput.dispose?.()
+  }
+
+  /**
+   * Inserts pasted text into the readline buffer without submitting it, keeping
+   * embedded line breaks. Falls back to staging for Node versions whose
+   * readline does not support multi-line editing.
+   */
+  private handlePaste(text: string): void {
+    if (this.closed) {
+      return
+    }
+
+    if (this.insertIntoInput(text)) {
+      return
+    }
+
+    if (text === '\n') {
+      return
+    }
+
+    this.staged.push(text)
+    const lines = text.split('\n').length
+    this.out(`${messages(this.language).repl.pasteStaged(lines)}\n`)
+    this.safePrompt()
+  }
+
+  private insertIntoInput(text: string): boolean {
+    if (!this.multilineBuffer) {
+      return false
+    }
+
+    const rl = this.rl as unknown as { line: string; cursor: number }
+    const before = rl.line.slice(0, rl.cursor)
+    const after = rl.line.slice(rl.cursor)
+    const next = `${before}${text}${after}`
+    rl.line = next
+    rl.cursor = before.length + text.length
+    ;(this.rl as unknown as Record<symbol, unknown>)[
+      this.multilineBuffer.flag
+    ] = next.includes('\n')
+    this.multilineBuffer.refresh.call(this.rl)
+    return true
+  }
+
+  private async flushStaged(): Promise<void> {
+    if (this.staged.length === 0) {
+      return
+    }
+    const query = this.staged.join('\n').trim()
+    this.staged = []
+    if (query === '') {
+      return
+    }
+    await this.runQuery(query, { echoed: true, inputLineErased: true })
+  }
+
   async start(): Promise<number> {
     const closed = new Promise<number>((resolve) => {
       this.rl.once('close', () => {
@@ -256,6 +371,7 @@ export class Repl {
     })
 
     if (this.terminal) {
+      this.enableBracketedPaste()
       this.input.on(
         'keypress',
         (
@@ -410,8 +526,17 @@ export class Repl {
       return
     }
 
-    const width = displayWidth(`ask> ${line}`)
-    const rows = Math.max(1, Math.ceil(width / this.columns()))
+    const columns = this.columns()
+    const lines = line.split('\n')
+    let rows = 0
+    for (let index = 0; index < lines.length; index += 1) {
+      const prefix = index === 0 ? 'ask> ' : '| '
+      rows += Math.max(
+        1,
+        Math.ceil(displayWidth(`${prefix}${lines[index]}`) / columns),
+      )
+    }
+
     let sequence = ''
     for (let index = 0; index < rows; index += 1) {
       sequence += '\x1b[1A\r\x1b[2K'
@@ -451,7 +576,7 @@ export class Repl {
   }
 
   async handleLine(raw: string): Promise<void> {
-    const line = raw.trim()
+    const line = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim()
     let inputLineErased = false
 
     if (line !== '' && !line.startsWith('/expand') && this.expanded) {
@@ -460,6 +585,7 @@ export class Repl {
     }
 
     if (line === '') {
+      await this.flushStaged()
       this.safePrompt()
       return
     }
@@ -514,7 +640,14 @@ export class Repl {
       return
     }
 
-    await this.runQuery(line, { echoed: true, inputLineErased })
+    let query = line
+    if (this.staged.length > 0) {
+      const staged = this.staged.join('\n')
+      this.staged = []
+      query = `${staged}\n${line}`
+    }
+
+    await this.runQuery(query, { echoed: true, inputLineErased })
     this.safePrompt()
   }
 
@@ -785,10 +918,17 @@ export class Repl {
     }
 
     this.rl.pause()
+    this.pasteInput?.suspendSource?.()
     let chosen: string | null = null
     try {
       chosen = await this.selector.select(choices)
     } finally {
+      this.pasteInput?.resumeSource?.()
+      try {
+        this.pasteInput?.setRawMode?.(true)
+      } catch {
+        // 输入流可能已关闭
+      }
       this.rl.resume()
     }
 

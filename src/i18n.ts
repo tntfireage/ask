@@ -70,6 +70,7 @@ export interface UiMessages {
     expandUsage: string
     expandNotFound: (id: number) => string
     expandNoCalls: string
+    pasteStaged: (lines: number) => string
     skillTable: {
       name: string
       source: string
@@ -144,6 +145,8 @@ const ZH: UiMessages = {
     expandUsage: '用法: /expand [编号|list]',
     expandNotFound: (id) => `没有编号为 ${id} 的工具调用`,
     expandNoCalls: '还没有工具调用',
+    pasteStaged: (lines) =>
+      `已暂存粘贴内容（${lines} 行），按 Enter 发送，Ctrl-C 退出`,
     skillTable: {
       name: '名称',
       source: '来源',
@@ -221,6 +224,8 @@ const EN: UiMessages = {
     expandUsage: 'Usage: /expand [number|list]',
     expandNotFound: (id) => `No tool call #${id}`,
     expandNoCalls: 'No tool calls yet',
+    pasteStaged: (lines) =>
+      `Captured pasted text (${lines} lines); press Enter to send, Ctrl-C to quit`,
     skillTable: {
       name: 'NAME',
       source: 'SOURCE',

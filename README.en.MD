@@ -139,6 +139,8 @@ Inside the REPL (an interactive terminal shows the colored welcome page and prom
 | Input | Behavior |
 |---|---|
 | A question | Submit it to the model; commands, results, and the answer appear in real time |
+| Multi-line paste | Inserted into the prompt with line breaks preserved; nothing runs until you press Enter |
+| Ctrl-J | Insert a line break in the input for hand-written multi-line questions (Enter still sends) |
 | `exit` / Ctrl-D | Quit |
 | `/clear` | Clear the current conversation context (history is untouched) |
 | `/history` | Open a filterable history list; the selection fills the input line without running it |

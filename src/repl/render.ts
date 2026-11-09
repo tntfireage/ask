@@ -11,6 +11,8 @@ const GREEN = '\x1b[32m'
 const RED = '\x1b[31m'
 const DIM = '\x1b[2m'
 const SPINNER = ['|', '/', '-', '\\']
+const QUESTION_PREFIX = ' ask > '
+const QUESTION_CONTINUATION = ' '.repeat(QUESTION_PREFIX.length)
 
 export interface RendererOptions {
   isTTY?: boolean
@@ -36,10 +38,12 @@ export function renderUserMessage(
   }
 
   const columns = (options.columns ?? (() => 80))()
-  for (const line of text.split('\n')) {
+  const lines = text.split('\n')
+  for (let index = 0; index < lines.length; index += 1) {
+    const prefix = index === 0 ? QUESTION_PREFIX : QUESTION_CONTINUATION
     out(
       `\x1b[48;5;${BG_QUESTION}m\x1b[38;5;${FG_QUESTION}m${padTo(
-        ` ask > ${line}`,
+        `${prefix}${lines[index]}`,
         columns,
       )}${RESET}\n`,
     )

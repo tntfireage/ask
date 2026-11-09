@@ -164,6 +164,23 @@ describe('colored rendering', () => {
     expect(displayWidth(firstLine)).toBe(20)
   })
 
+  it('paints a multi-line question with a single prompt prefix', () => {
+    const chunks: string[] = []
+    renderUserMessage('first\nsecond', (text) => chunks.push(text), {
+      color: true,
+      columns: () => 20,
+    })
+
+    const text = chunks.join('')
+    expect(text.match(/ask > /g)).toHaveLength(1)
+    expect(text).toContain('ask > first')
+    expect(text).toContain('       second')
+
+    for (const line of text.split('\n').slice(0, 2)) {
+      expect(displayWidth(line)).toBe(20)
+    }
+  })
+
   it('prints no question block when color is disabled', () => {
     const chunks: string[] = []
     renderUserMessage('hello', (text) => chunks.push(text), { color: false })
